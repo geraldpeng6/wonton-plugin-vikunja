@@ -1,11 +1,13 @@
-# 云吞插件模板
+# Vikunja
+
+Vikunja：待办和任务管理。这个仓库把上游官方镜像打包成云吞插件，登录走核心的 OIDC。
 
 云吞（Wonton）的插件就是一个 `docker-compose.yml`，顶层多一个 `x-wonton` 字段，写明插件在云吞里的身份、网页入口和要的
 权限。一个插件一个 Git 仓库，仓库根目录就是插件包，发布就是打 tag。用户在 App 里装上插件，核心按清单起容器、接好登录，
 插件的网页在 App 里作为小程序打开。
 
-这个仓库是模板：一个能装上的示例插件（nginx 显示一个向用户问好的网页），加上检查、开发环境和发布三个脚本。从这个模板
-新建仓库，照着下面把示例换成你的应用。
+仓库里是插件包本身（`docker-compose.yml` 和它引用的文件），加上检查、开发环境和发布三个脚本。下面是从模板写一个新插件的
+完整规则。
 
 ## 准备
 
@@ -40,7 +42,7 @@ scripts/dev.sh install
 | 路径 | 内容 |
 | --- | --- |
 | `docker-compose.yml` | 插件本身：compose 加上 `x-wonton` 清单 |
-| `icon.svg`、`web/` | 清单和 compose 引用的文件：图标、交给容器的配置和网页 |
+| `icon.png` | 清单引用的图标 |
 | `screenshots/` | 商店详情页里的截图 |
 | `scripts/check.sh` | 检查插件包，规则和安装时一样 |
 | `scripts/dev.sh` | 开发环境：起一套云吞，装、重装、卸载插件，看日志 |
@@ -500,6 +502,11 @@ scripts/check.sh
 
 插件自己的网页也照这条做：分组、顺序、位置和图标已经说明了的，不再加副标题、说明文字或标签重复一遍。错误、权限这类提示
 不算多余，照常写清楚。
+
+## 图标
+
+图标是 [Vikunja 上游的 maskable 标志](https://github.com/go-vikunja/vikunja/blob/5619c4a9f66ddfc13f7bbba24ada07c3e82ae7a0/frontend/originalMedia/icons/icon-maskable.png)，原样使用。
+Vikunja 名称和标志是其权利人的商标，许可、来源和商标说明见 [NOTICE](NOTICE)。
 
 ## 规则以哪里为准
 
