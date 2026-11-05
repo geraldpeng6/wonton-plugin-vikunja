@@ -1,61 +1,108 @@
-# 示例插件：nginx 显示一个网页，向登录的人问好。照着 README 的“写插件”换成你的应用。
+# Vikunja：API、前端和 SQLite 在同一个进程里，不额外起数据库。
+#
+# 登录全走核心的 OIDC：`auth.local.enabled` 关掉本地登录和注册，用户打开就由核心的身份提供方登进去。
+# Vikunja 的 OIDC 只写 issuer（`authurl`），端点由它自己从发现文档取；2.7.1 接受 http 的 issuer
+# （实测，核心的 OIDC 是 http）。`requireavailability` 让核心连不上时启动直接失败，不装作正常。
 services:
-  web:
-    # 镜像按摘要固定（多架构镜像写清单列表的摘要），标签只给人看。
-    image: nginx:1.30.6-alpine@sha256:0e52bd054126cdc040b1276c0af347aeb02a41b9cfe305d6094767ac30e97949
-    # 包里的文件经 configs 交给容器（核心在启动前写进去），不能用卷挂载。
+  vikunja:
+    image: vikunja/vikunja:2.7.1@sha256:f7dc8428d10aef17f3075886d3c1c022f566ec456f88985f02c137f4fc534576
+    # 镜像里的二进制固定以 1000 运行；两个数据目录交给它。
+    user: "1000:1000"
+    environment:
+      TZ: ${TZ}
+      # Vikunja 建账号、发邀请和提醒都用邮箱；没填邮箱的用户装不上，不去等登录时才失败。
+      WONTON_OWNER_EMAIL: ${WONTON_OWNER_EMAIL:?需要用户邮箱}
+    volumes:
+      # SQLite 库和附件。
+      - ${WONTON_APP_DATA}/db:/db
+      - ${WONTON_APP_DATA}/files:/app/vikunja/files
     configs:
-      - source: site
-        target: /etc/nginx/conf.d/default.conf
-      - source: page
-        target: /usr/share/nginx/html/index.html
+      - source: config
+        target: /app/vikunja/config.yml
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
+      # 镜像只有二进制，没有 shell 和 curl。`doctor` 检查配置、数据库、附件目录和 OIDC 发现，
+      # 有一项不过就以 1 退出。
+      test: ["CMD", "/app/vikunja/vikunja", "doctor"]
       interval: 30s
-      timeout: 5s
-      start_period: 30s
-      start_interval: 1s
+      timeout: 20s
+      retries: 3
+      start_period: 60s
+      start_interval: 2s
 
 configs:
-  site:
-    file: web/default.conf
-  page:
-    file: web/index.html
+  config:
+    content: |
+      service:
+        publicurl: ${WONTON_APP_URL}/
+        timezone: ${TZ}
+        # 不写就每次启动随机生成，重启后所有会话失效。
+        secret: ${WONTON_SECRET_SERVICE_SECRET}
+      database:
+        type: sqlite
+      files:
+        basepath: /app/vikunja/files
+      # 前端只认用户设置里的语言，OIDC 建号时拿不到浏览器语言，默认给中文。
+      defaultsettings:
+        language: zh-CN
+        timezone: ${TZ}
+      auth:
+        local:
+          enabled: false
+        openid:
+          enabled: true
+          providers:
+            wonton:
+              name: Wonton
+              authurl: ${WONTON_OIDC_ISSUER}
+              clientid: ${WONTON_OIDC_CLIENT_ID}
+              clientsecret: ${WONTON_OIDC_CLIENT_SECRET}
+              requireavailability: true
 
 x-wonton:
   spec: "0.4"
-  # 换成你自己的：反向域名形式，装上以后不能改。
-  id: app.example.hello
-  version: 0.1.1
+  id: io.vikunja.vikunja
+  version: 0.1.0
   kind: app
-  title: { zh: 你好, en: Hello }
-  description: { zh: 向登录的人问好的示例网页, en: An example page that greets whoever is signed in }
-  icon: icon.svg
+  title: { zh: Vikunja, en: Vikunja }
+  description:
+    zh: 列待办清单、分派任务、设截止日期，用看板推进
+    en: Lists, tasks, due dates and kanban boards to get things done
+  icon: icon.png
   notices: [NOTICE]
-  screenshots: [screenshots/home.png]
-  author: { name: Example }
-  homepage: https://nginx.org
-  # 应用（这里是 nginx）的许可证；插件包自己的许可证写在仓库的 LICENSE 里。
-  license: BSD-2-Clause
+  screenshots: [screenshots/tasks.png]
+  author: { name: geraldpeng6, url: https://github.com/geraldpeng6 }
+  homepage: https://vikunja.io
+  license: AGPL-3.0-only
   tags:
-    zh: [工具]
-    en: [Tools]
+    zh: [待办, 任务, 看板, 清单]
+    en: [Todo, Tasks, Kanban, Lists]
   about:
     zh: |
-      一个示例网页：登录以后，页面会向你问好。新建插件时可以照着改。
+      待办和任务管理：清单、任务、截止日期、标签、优先级和看板，进度一眼看到。
+
+      登录用云吞的账号，打开就在里面，不用再注册或设密码。
     en: |
-      An example page: once you are signed in, the page says hello. Copy it as a starting point for a new plugin.
-  release_notes: { zh: 名字和说明更新。, en: Product name and description update. }
+      Todo and task management: lists, tasks, due dates, labels, priorities and kanban boards, so progress is visible at a glance.
+
+      Sign-in uses your Wonton account; the app opens straight into your work, with no second sign-up or password.
+  release_notes: { zh: 第一个版本。 , en: First release. }
   webui:
-    service: web
-    port: 80
-    # 应用不认 OIDC 时，由网关在请求上加上用户名（README 的“网页入口和登录”）。
-    sso: proxy
-    proxy:
-      headers:
-        Remote-User: "{user}"
-  permissions: []
-  # 上游 nginx 官方镜像，amd64 和 arm64 都有；上游没写最低内存，按本机空闲实测取整（实测约 24M，取 64M）。
+    service: vikunja
+    port: 3456
+    # 打开网页直接进 OIDC 登录，不用先点登录按钮。
+    path: /login?redirectToProvider=wonton
+    sso: oidc
+    oidc:
+      redirect_paths: [/auth/openid/wonton]
+  secrets:
+    service_secret:
+      generate: { bytes: 32 }
+  permissions:
+    - owner.identity
+    # Webhook、链接预览和 CalDAV 客户端要出网；出网时核心给内部地址写好 NO_PROXY，
+    # 应用访问核心的 OIDC 才不被宿主代理挡住。
+    - network.egress
+  # 上游没写最低内存，本机空闲实测约 55M，取 128M。镜像有 amd64 和 arm64。
   requirements:
     arch: [amd64, arm64]
-    memory: 64M
+    memory: 128M
