@@ -85,7 +85,7 @@ x-wonton:
       Todo and task management: lists, tasks, due dates, labels, priorities and kanban boards, so progress is visible at a glance.
 
       Sign-in uses your Wonton account; the app opens straight into your work, with no second sign-up or password.
-  release_notes: { zh: 第一个版本。 , en: First release. }
+  release_notes: { zh: 第一个版本。, en: First release. }
   webui:
     service: vikunja
     port: 3456
