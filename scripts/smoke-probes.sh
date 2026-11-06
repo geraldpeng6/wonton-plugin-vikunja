@@ -6,7 +6,8 @@
 #       并在 SMOKE_NOTE 里写原因。dweb / web_get 是带用户会话的请求助手，可继续走应用自己的登录链。
 # 工具：MCP_TOOL 写一个只读工具名（可带插件前缀），MCP_ARGS 是 JSON 参数；mcp_assert 从标准输入读调用结果。
 #       要断言多个工具时改成写 mcp_check；调用前要备数据时写 before_mcp。
-# 数据：data_write 用随机标记建一个项目并把标记存进 $SMOKE_STATE，data_check 读回标记去应用里找；
+# 数据：data_write 用随机标记建一个项目、把标记原样写进 $SMOKE_STATE（标记文件，data_write 覆盖写），
+#       data_check 读回标记去应用里找；
 #       升级和重装都会换 OIDC 客户端密钥，所以每次都现取新令牌，不复用旧的。
 #       本插件的 API 一律用裸 curl 直连（vikunja_base 给出的域名）：套件的 web_get 会把请求拼到
 #       SMOKE_WEB_URL（带 webui.path 的入口）后面，对 webui.path 不是 / 的插件会拼出错误地址。
@@ -72,14 +73,14 @@ data_write() {
     -d "{\"title\":\"smoke-data-$marker\"}" "$base/api/v1/projects")" || { echo "建项目请求失败"; return 1; }
   jq -e --arg t "smoke-data-$marker" '.title == $t' <<<"$resp" >/dev/null 2>&1 ||
     { echo "项目没建成：$(head -c 200 <<<"$resp")"; return 1; }
-  printf '%s' "$marker" >"${SMOKE_STATE:-}/data-marker"
+  printf '%s' "$marker" >"${SMOKE_STATE:?}"
 }
 
 data_check() {
   local base marker token resp
   base="$(vikunja_base)" || return 1
-  marker="$(cat "${SMOKE_STATE:-}/data-marker" 2>/dev/null)"
-  [[ -n "$marker" ]] || { echo "SMOKE_STATE 里没有 data-marker（data_write 没跑过？）"; return 1; }
+  marker="$(cat "${SMOKE_STATE:-}" 2>/dev/null)"
+  [[ -n "$marker" ]] || { echo "SMOKE_STATE 标记文件是空的（data_write 没跑过？）"; return 1; }
   token="$(vikunja_token)"
   [[ -n "$token" ]] || { echo "callback 没有换到应用令牌"; return 1; }
   resp="$(curl -sS --noproxy '*' -b "${SMOKE_JAR:-}" -H "Authorization: Bearer $token" "$base/api/v1/projects")" ||
