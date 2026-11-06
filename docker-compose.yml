@@ -1,7 +1,7 @@
 # Vikunja：API、前端和 SQLite 在同一个进程里，不额外起数据库。
 #
 # 登录全走核心的 OIDC：`auth.local.enabled` 关掉本地登录和注册，用户打开就由核心的身份提供方登进去。
-# Vikunja 的 OIDC 只写 issuer（`authurl`），端点由它自己从发现文档取；2.7.1 接受 http 的 issuer
+# Vikunja 的 OIDC 只写 issuer（`authurl`），端点由它自己从发现文档取；2.8.0 接受 http 的 issuer
 # （实测，核心的 OIDC 是 http）。`requireavailability` 让核心连不上时启动直接失败，不装作正常。
 services:
   vikunja:

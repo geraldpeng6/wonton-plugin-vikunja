@@ -41,9 +41,12 @@ vk_token() {
   base_core="${E2E_BASE:-}${SMOKE_BASE:-}"
   token="${E2E_TOKEN:-}${SMOKE_TOKEN:-}"
   base_web="$(vk_web_base)" || return 1
-  # 核心会话：e2e 的 web_login 在更晚阶段才跑，data_write 先自己登一次（幂等）
-  curl -sS --noproxy '*' -o /dev/null -c "$jar" --data-urlencode "token=$token" "$base_core/_wonton/login" ||
+  # 核心会话和应用会话都补进 jar：e2e 的 web_login 在网页节才跑，data_write 阶段 jar 可能还没有
+  # 应用会话。-b 保留已有 cookie（只写 -c 会把 jar 里别的域的会话抹掉）。
+  curl -sS --noproxy '*' -o /dev/null -b "$jar" -c "$jar" --data-urlencode "token=$token" "$base_core/_wonton/login" ||
     { echo "主人令牌登录不了核心" >&2; return 1; }
+  curl -sS --noproxy '*' -o /dev/null -L -b "$jar" -c "$jar" -H 'Accept: text/html' "$base_web/" ||
+    { echo "走不通应用网页的登录跳转" >&2; return 1; }
   info="$(curl -sS --noproxy '*' --fail-with-body -b "$jar" "$base_web/api/v1/info")" ||
     { echo "取 /api/v1/info 失败" >&2; return 1; }
   auth_url="$(jq -r '.auth.openid_connect.providers[0].auth_url' <<<"$info")"
