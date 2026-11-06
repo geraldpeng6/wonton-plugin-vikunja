@@ -5,7 +5,7 @@
 # （实测，核心的 OIDC 是 http）。`requireavailability` 让核心连不上时启动直接失败，不装作正常。
 services:
   vikunja:
-    image: vikunja/vikunja:2.7.1@sha256:f7dc8428d10aef17f3075886d3c1c022f566ec456f88985f02c137f4fc534576
+    image: vikunja/vikunja:2.8.0@sha256:35d937baf3b5d5803bed6b9e11d007448b7b536df9e4346dc35551e1072636c3
     # 镜像里的二进制固定以 1000 运行；两个数据目录交给它。
     user: "1000:1000"
     environment:
@@ -61,7 +61,7 @@ configs:
 x-wonton:
   spec: "0.4"
   id: io.vikunja.vikunja
-  version: 0.1.0
+  version: 0.2.0
   kind: app
   title: { zh: Vikunja, en: Vikunja }
   description:
@@ -85,7 +85,9 @@ x-wonton:
       Todo and task management: lists, tasks, due dates, labels, priorities and kanban boards, so progress is visible at a glance.
 
       Sign-in uses your Wonton account; the app opens straight into your work, with no second sign-up or password.
-  release_notes: { zh: 第一个版本。, en: First release. }
+  release_notes:
+    zh: "上游 Vikunja 升到 2.8.0：修复 19 个安全问题，新增回收站和撤销；升级自动迁移数据，已有任务会重新订阅创建者和被指派人。"
+    en: "Upstream Vikunja bumped to 2.8.0: 19 security fixes, new trash bin with undo; data migrates automatically during the upgrade — existing tasks get their creators and assignees re-subscribed."
   webui:
     service: vikunja
     port: 3456
