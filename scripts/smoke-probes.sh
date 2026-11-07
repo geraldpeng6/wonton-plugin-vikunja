@@ -21,15 +21,26 @@ vikunja_base() {
   python3 -c 'import urllib.parse, sys; p = urllib.parse.urlsplit(sys.argv[1]); print(f"{p.scheme}://{p.netloc}")' "$SMOKE_WEB_URL"
 }
 
+# 核心会话 Cookie：数据钩子跑在第一次会话建立之前，自己登录（网关只认核心会话）。
+smoke_core_login() { # <jar> <插件地址>：先拿核心会话 Cookie，再走一次插件首页的登录跳转——
+  # 网关的会话 Cookie 要落在插件主机上，应用的登录链和接口才认（两步都要，少一步后面全是 401）。
+  local base token
+  base="${E2E_BASE:-${SMOKE_BASE:-}}"
+  token="${E2E_TOKEN:-${SMOKE_TOKEN:-}}"
+  [[ -n "$base" && -n "$token" && -n "${2:-}" ]] || { echo "没有核心地址、主人令牌或插件地址"; return 1; }
+  curl -sS --noproxy '*' -o /dev/null -b "$1" -c "$1" \
+    --data-urlencode "token=$token" "$base/_wonton/login" &&
+    curl -sS --noproxy '*' -o /dev/null -L -b "$1" -c "$1" -H 'Accept: text/html' "${2%/}/"
+}
+
 # 走完浏览器式 OIDC（Hydra authorize 用核心会话自动登录）→ 回调拿 code → 应用自己的
 # POST /api/v1/auth/openid/wonton/callback 换应用令牌，打到标准输出。
 # 冒烟的数据钩子跑在第一次会话建立之前，进来先走一遍插件网页登录把核心会话放进 $SMOKE_JAR。
 vikunja_token() {
   local base info auth_url redirect enc_redirect state final code body
   base="$(vikunja_base)" || return 1
-  if [[ ! -s "${SMOKE_JAR:-}" ]]; then
-    probes_dev web --jar "${SMOKE_JAR:-}" --fresh >/dev/null 2>&1 || { echo "建立核心会话失败"; return 1; }
-  fi
+# 升级和重装都会让上一轮的 Cookie 失效，每次现登录（两次 curl，便宜）。
+  smoke_core_login "${SMOKE_JAR:-}" "$base" || { echo "建立核心会话失败"; return 1; }
   info="$(curl -sS --noproxy '*' -b "${SMOKE_JAR:-}" "$base/api/v1/info")" ||
     { echo "取 /api/v1/info 失败"; return 1; }
   auth_url="$(jq -r '.auth.openid_connect.providers[0].auth_url // empty' <<<"$info" 2>/dev/null)"
@@ -39,7 +50,7 @@ vikunja_token() {
   state="$(head -c8 /dev/urandom | od -An -tx1 | tr -d ' \n')"   # Hydra 要求 state ≥ 8 字符
   final="$(curl -sS --noproxy '*' -o /dev/null -L -b "${SMOKE_JAR:-}" -c "${SMOKE_JAR:-}" -H 'Accept: text/html' \
     -w '%{url_effective}' \
-    "$auth_url?client_id=$SMOKE_PLUGIN_ID&redirect_uri=$enc_redirect&response_type=code&scope=openid+profile+email&state=$state")" ||
+    "$auth_url?client_id=${E2E_NAME_ID:-${SMOKE_PLUGIN_ID:-}}&redirect_uri=$enc_redirect&response_type=code&scope=openid+profile+email&state=$state")" ||
     { echo "authorize 链失败"; return 1; }
   code="$(python3 -c 'import sys,urllib.parse;print((urllib.parse.parse_qs(urllib.parse.urlparse(sys.argv[1]).query).get("code") or [""])[0])' "$final")"
   [[ -n "$code" ]] || { echo "回调里没有 code：$final"; return 1; }
