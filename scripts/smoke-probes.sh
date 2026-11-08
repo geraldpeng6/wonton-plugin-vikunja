@@ -62,7 +62,11 @@ vk_token() {
 identity_check() {
   local token me
   token="$(vk_token)" || return 1
-  me="$(web_get /api/v1/user -H "Authorization: Bearer $token")" || { echo "/api/v1/user 失败：$me"; return 1; }
+  # 2.8.0 起用户端点也在 /api/v2（同 info），先 v2 再回落 v1。
+  me="$(web_get /api/v2/user -H "Authorization: Bearer $token")" &&
+    jq -e '.username != null' <<<"$me" >/dev/null 2>&1 ||
+    me="$(web_get /api/v1/user -H "Authorization: Bearer $token")" ||
+    { echo "/api/v2/user（含 /api/v1 回落）失败：$me"; return 1; }
   jq -e --arg u "$SMOKE_OWNER" '.username == $u' <<<"$me" >/dev/null ||
     { echo "当前用户不是用户 $SMOKE_OWNER：$me"; return 1; }
 }
