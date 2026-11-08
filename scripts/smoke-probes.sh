@@ -61,6 +61,10 @@ identity_check() {
 # 标记写进 $SMOKE_STATE；升级/重装后按 id 读回来核对标题。只依赖契约变量（SMOKE_JAR/SMOKE_WEB_URL/
 # SMOKE_BASE/SMOKE_TOKEN/SMOKE_STATE）。接口形状按 v2.8.0 的 swagger：
 # PUT /api/v1/projects、PUT /api/v1/projects/{id}/tasks。
+marker_file() { # SMOKE_STATE 在套件里是状态目录（e2e 传的是标记文件本身），标记放对应路径
+  if [[ -d "$SMOKE_STATE" ]]; then printf '%s' "$SMOKE_STATE/vikunja-marker"; else printf '%s' "${SMOKE_STATE}.marker"; fi
+}
+
 data_write() {
   local token marker project project_id task task_id
   [[ -n "${SMOKE_JAR:-}" && -n "${SMOKE_WEB_URL:-}" ]] ||
@@ -78,14 +82,14 @@ data_write() {
   task_id="$(jq -r '.id // empty' <<<"$task")"
   [[ -n "$task_id" ]] || { echo "建任务没回 id：$task"; return 1; }
   jq -nc --arg m "$marker" --arg p "$project_id" --arg t "$task_id" \
-    '{marker:$m,project_id:$p,task_id:$t}' >"$SMOKE_STATE"
+    '{marker:$m,project_id:$p,task_id:$t}' >"$(marker_file)"
 }
 
 data_check() {
   local token marker project_id task_id seen
-  marker="$(jq -r .marker "$SMOKE_STATE")"
-  project_id="$(jq -r .project_id "$SMOKE_STATE")"
-  task_id="$(jq -r .task_id "$SMOKE_STATE")"
+  marker="$(jq -r .marker "$(marker_file)")"
+  project_id="$(jq -r .project_id "$(marker_file)")"
+  task_id="$(jq -r .task_id "$(marker_file)")"
   token="$(vk_token)" || { echo "拿不到应用令牌，查不了数据" >&2; return 1; }
   seen="$(curl -sS --noproxy '*' -b "$SMOKE_JAR" -H "Authorization: Bearer $token" \
     "$SMOKE_WEB_URL/api/v1/projects/$project_id")" ||
