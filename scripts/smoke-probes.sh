@@ -27,7 +27,8 @@ vk_token() {
     { echo "主人令牌登录不了核心" >&2; return 1; }
   curl -sS --noproxy '*' -o /dev/null -L -b "$jar" -c "$jar" -H 'Accept: text/html' "$SMOKE_WEB_URL/" ||
     { echo "走不通应用网页的登录跳转" >&2; return 1; }
-  info="$(web_get /api/v1/info)" || { echo "取 /api/v1/info 失败" >&2; return 1; }
+  info="$(curl -sS --noproxy '*' --fail-with-body -b "$jar" "${SMOKE_WEB_URL%/}/api/v1/info")" ||
+    { echo "取 /api/v1/info 失败" >&2; return 1; }
   auth_url="$(jq -r '.auth.openid_connect.providers[0].auth_url' <<<"$info")"
   [[ -n "$auth_url" && "$auth_url" != null ]] || { echo "没有 OIDC provider：$info" >&2; return 1; }
   jq -e '.auth.local.enabled == false and .auth.local.registration_enabled == false' <<<"$info" >/dev/null ||
