@@ -8,6 +8,11 @@
 #       要断言多个工具时改成写 mcp_check；调用前要备数据时写 before_mcp。
 # 装之前要准备（如先配出口代理）：写 before_install。
 
+_vk_origin() { # web_url 可能带路径和查询（如 /login?redirectToProvider=…），拼 API 前取 origin
+  local u="${SMOKE_WEB_URL%%\?*}" rest="${SMOKE_WEB_URL#*://}"
+  printf '%s://%s' "${u%%://*}" "${rest%%/*}"
+}
+
 web_assert() { grep -qi 'vikunja'; }   # 应用真实页面
 
 # 走完浏览器式 OIDC（Hydra authorize 用核心会话自动登录）→ 回调拿 code → 应用自己的
@@ -25,14 +30,19 @@ vk_token() {
   # （只写 -c 会把 jar 里别的域的会话抹掉）。
   curl -sS --noproxy '*' -o /dev/null -b "$jar" -c "$jar" --data-urlencode "token=$token" "$base_core/_wonton/login" ||
     { echo "主人令牌登录不了核心" >&2; return 1; }
-  curl -sS --noproxy '*' -o /dev/null -L -b "$jar" -c "$jar" -H 'Accept: text/html' "$SMOKE_WEB_URL/" ||
+  curl -sS --noproxy '*' -o /dev/null -L -b "$jar" -c "$jar" -H 'Accept: text/html' "$SMOKE_WEB_URL" ||
     { echo "走不通应用网页的登录跳转" >&2; return 1; }
-  info="$(web_get /api/v1/info)" || { echo "取 /api/v1/info 失败" >&2; return 1; }
+  # 2.8.0 起部分路由在 /api/v2（登录页提示原文就是 v2），/info 先试 v2 再回落 v1；都带现场。
+  info="$(curl -sS --noproxy '*' -o /tmp/vk-info -w '%{http_code}' -b "$jar" "$(_vk_origin)/api/v2/info")" &&
+    jq -e '.auth != null' </tmp/vk-info >/dev/null 2>&1 ||
+    info="$(curl -sS --noproxy '*' -o /tmp/vk-info -w '%{http_code}' --fail-with-body -b "$jar" "$(_vk_origin)/api/v1/info")" ||
+    { echo "取 /api/v2/info（含 /api/v1 回落）失败：HTTP $info $(head -c 200 </tmp/vk-info 2>/dev/null)" >&2; return 1; }
+  info="$(cat /tmp/vk-info)"
   auth_url="$(jq -r '.auth.openid_connect.providers[0].auth_url' <<<"$info")"
   [[ -n "$auth_url" && "$auth_url" != null ]] || { echo "没有 OIDC provider：$info" >&2; return 1; }
   jq -e '.auth.local.enabled == false and .auth.local.registration_enabled == false' <<<"$info" >/dev/null ||
     { echo "本地登录或注册还开着：$(jq -c .auth.local <<<"$info")" >&2; return 1; }
-  redirect="$SMOKE_WEB_URL/auth/openid/wonton"
+  redirect="$(_vk_origin)/auth/openid/wonton"
   enc_redirect="$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=""))' "$redirect")"
   state="$(head -c8 /dev/urandom | od -An -tx1 | tr -d ' \n')"   # Hydra 要求 state ≥ 8 字符
   final="$(curl -sS --noproxy '*' -o /dev/null -L -b "$jar" -c "$jar" -H 'Accept: text/html' \
@@ -43,7 +53,7 @@ vk_token() {
   [[ -n "$code" ]] || { echo "回调里没有 code：$final" >&2; return 1; }
   body="$(jq -nc --arg c "$code" --arg r "$redirect" '{code:$c,redirect_url:$r}')"
   token_out="$(curl -sS --noproxy '*' -b "$jar" -H 'Content-Type: application/json' -d "$body" \
-    "$SMOKE_WEB_URL/api/v1/auth/openid/wonton/callback" | jq -r '.token // empty')" ||
+    "$(_vk_origin)/api/v1/auth/openid/wonton/callback" | jq -r '.token // empty')" ||
     { echo "callback 换令牌失败：$token_out" >&2; return 1; }
   [[ -n "$token_out" ]] || { echo "callback 没有返回令牌" >&2; return 1; }
   printf '%s' "$token_out"
@@ -52,7 +62,12 @@ vk_token() {
 identity_check() {
   local token me
   token="$(vk_token)" || return 1
-  me="$(web_get /api/v1/user -H "Authorization: Bearer $token")" || { echo "/api/v1/user 失败：$me"; return 1; }
+  # 2.8.0 起用户端点也在 /api/v2（同 info），先 v2 再回落 v1；套件 web_get 直接拼 web_url
+  # （带 /login?redirectToProvider=… 路径）会落进页面兜底，这里按 origin 直调。
+  me="$(curl -sS --noproxy '*' --fail-with-body -b "${SMOKE_JAR:-}" -H "Authorization: Bearer $token" "$(_vk_origin)/api/v2/user")" &&
+    jq -e '.username != null' <<<"$me" >/dev/null 2>&1 ||
+    me="$(curl -sS --noproxy '*' --fail-with-body -b "${SMOKE_JAR:-}" -H "Authorization: Bearer $token" "$(_vk_origin)/api/v1/user")" ||
+    { echo "/api/v2/user（含 /api/v1 回落）失败：$me"; return 1; }
   jq -e --arg u "$SMOKE_OWNER" '.username == $u' <<<"$me" >/dev/null ||
     { echo "当前用户不是用户 $SMOKE_OWNER：$me"; return 1; }
 }
@@ -61,6 +76,10 @@ identity_check() {
 # 标记写进 $SMOKE_STATE；升级/重装后按 id 读回来核对标题。只依赖契约变量（SMOKE_JAR/SMOKE_WEB_URL/
 # SMOKE_BASE/SMOKE_TOKEN/SMOKE_STATE）。接口形状按 v2.8.0 的 swagger：
 # PUT /api/v1/projects、PUT /api/v1/projects/{id}/tasks。
+marker_file() { # SMOKE_STATE 在套件里是状态目录（e2e 传的是标记文件本身），标记放对应路径
+  if [[ -d "$SMOKE_STATE" ]]; then printf '%s' "$SMOKE_STATE/vikunja-marker"; else printf '%s' "${SMOKE_STATE}.marker"; fi
+}
+
 data_write() {
   local token marker project project_id task task_id
   [[ -n "${SMOKE_JAR:-}" && -n "${SMOKE_WEB_URL:-}" ]] ||
@@ -69,31 +88,31 @@ data_write() {
   marker="保数据-$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
   project="$(curl -sS --noproxy '*' --fail-with-body -b "$SMOKE_JAR" -X PUT \
     -H "Authorization: Bearer $token" -H 'Content-Type: application/json' -d "{\"title\":\"$marker\"}" \
-    "$SMOKE_WEB_URL/api/v1/projects")" || { echo "建项目失败：$project"; return 1; }
+    "$(_vk_origin)/api/v1/projects")" || { echo "建项目失败：$project"; return 1; }
   project_id="$(jq -r '.id // empty' <<<"$project")"
   [[ -n "$project_id" ]] || { echo "建项目没回 id：$project"; return 1; }
   task="$(curl -sS --noproxy '*' --fail-with-body -b "$SMOKE_JAR" -X PUT \
     -H "Authorization: Bearer $token" -H 'Content-Type: application/json' -d "{\"title\":\"$marker\"}" \
-    "$SMOKE_WEB_URL/api/v1/projects/$project_id/tasks")" || { echo "建任务失败：$task"; return 1; }
+    "$(_vk_origin)/api/v1/projects/$project_id/tasks")" || { echo "建任务失败：$task"; return 1; }
   task_id="$(jq -r '.id // empty' <<<"$task")"
   [[ -n "$task_id" ]] || { echo "建任务没回 id：$task"; return 1; }
   jq -nc --arg m "$marker" --arg p "$project_id" --arg t "$task_id" \
-    '{marker:$m,project_id:$p,task_id:$t}' >"$SMOKE_STATE"
+    '{marker:$m,project_id:$p,task_id:$t}' >"$(marker_file)"
 }
 
 data_check() {
   local token marker project_id task_id seen
-  marker="$(jq -r .marker "$SMOKE_STATE")"
-  project_id="$(jq -r .project_id "$SMOKE_STATE")"
-  task_id="$(jq -r .task_id "$SMOKE_STATE")"
+  marker="$(jq -r .marker "$(marker_file)")"
+  project_id="$(jq -r .project_id "$(marker_file)")"
+  task_id="$(jq -r .task_id "$(marker_file)")"
   token="$(vk_token)" || { echo "拿不到应用令牌，查不了数据" >&2; return 1; }
   seen="$(curl -sS --noproxy '*' -b "$SMOKE_JAR" -H "Authorization: Bearer $token" \
-    "$SMOKE_WEB_URL/api/v1/projects/$project_id")" ||
+    "$(_vk_origin)/api/v1/projects/$project_id")" ||
     { echo "项目 $project_id 读不到（数据丢了？）：$seen"; return 1; }
   [[ "$(jq -r '.title // empty' <<<"$seen")" == "$marker" ]] ||
     { echo "项目对不上：期待标题 $marker（id $project_id），看到 $(jq -c '{id,title}' <<<"$seen" 2>/dev/null || head -c 200 <<<"$seen")"; return 1; }
   seen="$(curl -sS --noproxy '*' -b "$SMOKE_JAR" -H "Authorization: Bearer $token" \
-    "$SMOKE_WEB_URL/api/v1/tasks/$task_id")" ||
+    "$(_vk_origin)/api/v1/tasks/$task_id")" ||
     { echo "任务 $task_id 读不到（数据丢了？）：$seen"; return 1; }
   [[ "$(jq -r '.title // empty' <<<"$seen")" == "$marker" ]] ||
     { echo "任务对不上：期待标题 $marker（id $task_id），看到 $(jq -c '{id,title}' <<<"$seen" 2>/dev/null || head -c 200 <<<"$seen")"; return 1; }
