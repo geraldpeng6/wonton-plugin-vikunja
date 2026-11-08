@@ -62,10 +62,11 @@ vk_token() {
 identity_check() {
   local token me
   token="$(vk_token)" || return 1
-  # 2.8.0 起用户端点也在 /api/v2（同 info），先 v2 再回落 v1。
-  me="$(web_get /api/v2/user -H "Authorization: Bearer $token")" &&
+  # 2.8.0 起用户端点也在 /api/v2（同 info），先 v2 再回落 v1；套件 web_get 直接拼 web_url
+  # （带 /login?redirectToProvider=… 路径）会落进页面兜底，这里按 origin 直调。
+  me="$(curl -sS --noproxy '*' --fail-with-body -b "${SMOKE_JAR:-}" -H "Authorization: Bearer $token" "$(_vk_origin)/api/v2/user")" &&
     jq -e '.username != null' <<<"$me" >/dev/null 2>&1 ||
-    me="$(web_get /api/v1/user -H "Authorization: Bearer $token")" ||
+    me="$(curl -sS --noproxy '*' --fail-with-body -b "${SMOKE_JAR:-}" -H "Authorization: Bearer $token" "$(_vk_origin)/api/v1/user")" ||
     { echo "/api/v2/user（含 /api/v1 回落）失败：$me"; return 1; }
   jq -e --arg u "$SMOKE_OWNER" '.username == $u' <<<"$me" >/dev/null ||
     { echo "当前用户不是用户 $SMOKE_OWNER：$me"; return 1; }
