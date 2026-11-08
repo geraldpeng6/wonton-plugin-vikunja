@@ -32,11 +32,12 @@ vk_token() {
     { echo "主人令牌登录不了核心" >&2; return 1; }
   curl -sS --noproxy '*' -o /dev/null -L -b "$jar" -c "$jar" -H 'Accept: text/html' "$SMOKE_WEB_URL" ||
     { echo "走不通应用网页的登录跳转" >&2; return 1; }
-  # 2.8.0 起部分路由在 /api/v2（登录页提示原文就是 v2），/info 优先 v2，旧版没有 v2 时回落 v1。
-  info="$(curl -sS --noproxy '*' -b "$jar" "$(_vk_origin)/api/v2/info")" &&
-    jq -e '.auth != null' <<<"$info" >/dev/null 2>&1 ||
-    info="$(curl -sS --noproxy '*' --fail-with-body -b "$jar" "$(_vk_origin)/api/v1/info")" ||
-    { echo "取 /api/v2/info（含 /api/v1 回落）失败" >&2; return 1; }
+  # 2.8.0 起部分路由在 /api/v2（登录页提示原文就是 v2），/info 先试 v2 再回落 v1；都带现场。
+  info="$(curl -sS --noproxy '*' -o /tmp/vk-info -w '%{http_code}' -b "$jar" "$(_vk_origin)/api/v2/info")" &&
+    jq -e '.auth != null' </tmp/vk-info >/dev/null 2>&1 ||
+    info="$(curl -sS --noproxy '*' -o /tmp/vk-info -w '%{http_code}' --fail-with-body -b "$jar" "$(_vk_origin)/api/v1/info")" ||
+    { echo "取 /api/v2/info（含 /api/v1 回落）失败：HTTP $info $(head -c 200 </tmp/vk-info 2>/dev/null)" >&2; return 1; }
+  info="$(cat /tmp/vk-info)"
   auth_url="$(jq -r '.auth.openid_connect.providers[0].auth_url' <<<"$info")"
   [[ -n "$auth_url" && "$auth_url" != null ]] || { echo "没有 OIDC provider：$info" >&2; return 1; }
   jq -e '.auth.local.enabled == false and .auth.local.registration_enabled == false' <<<"$info" >/dev/null ||
