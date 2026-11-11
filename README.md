@@ -1,6 +1,6 @@
 # Vikunja
 
-开发流程见[插件开发指南](https://github.com/geraldpeng6/wonton-docs/blob/main/develop.md)。
+开发流程见[插件开发指南](https://github.com/wontonapp/wonton-docs/blob/main/develop.md)。
 
 Vikunja：待办和任务管理。这个仓库把上游官方镜像打包成云吞插件，登录走核心的 OIDC。
 
