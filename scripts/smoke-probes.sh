@@ -211,7 +211,7 @@ PY
   # 等投递：提醒 cron 到点后由 mailer 发出，核心亚秒取走——直接等主人私聊里的投递事件。
   # 核心的收信事件连接断开重连期间受理的信会丢（SMTP 250 但不投递、Mailpit 也没滞留，见
   # 底座的问题）：第一次 5 分钟没到就再建一个提醒任务（再给 90 秒 + 5 分钟），第二次才算数。
-
+  seen=0
   for attempt in 1 2; do
     if [[ "$attempt" == 2 ]]; then
       reminder="$(python3 -c 'import datetime;print((datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(seconds=90)).isoformat())')"
