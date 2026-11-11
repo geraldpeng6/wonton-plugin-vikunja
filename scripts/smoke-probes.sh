@@ -158,7 +158,7 @@ _delivered_after() { # <插件 id> <发送时刻毫秒>：发送之后投进主�
 }
 
 extra_check() { # 邮件专项：建一个 90 秒后提醒的任务，等提醒信出现、再等核心投进私聊后取走
-  local token marker project_id task reminder out
+  local token marker project_id task reminder out db
   [[ -n "${SMOKE_JAR:-}" && -n "${SMOKE_WEB_URL:-}" && -n "${SMOKE_OWNER:-}" ]] ||
     { echo "缺冒烟变量：需要 SMOKE_JAR/SMOKE_WEB_URL/SMOKE_OWNER" >&2; return 1; }
   token="$(vk_token)" || { echo "拿不到应用令牌" >&2; return 1; }
@@ -166,13 +166,17 @@ extra_check() { # 邮件专项：建一个 90 秒后提醒的任务，等提醒�
   # 之外的收件人）。Vikunja 的收件人只能来自 OIDC 的 email 声明，没有发外部地址的功能可触发。
   local owner_email="$SMOKE_OWNER@wonton.internal"
   # 提醒邮件受用户偏好 email_reminders_enabled 控制：0.3.0 前建的账号默认关（当时的上游默认），
-  # 升级不回填。测试前置：给主人打开。这个路由带 cookie 会触发 412（CSRF 检查按会话请求算），
-  # 只用 API token（Bearer）不带 cookie；拒了不挡路，提醒没到时连原因一起报。
-  curl -sS --noproxy '*' --fail-with-body -X POST \
-    -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
-    -d '{"email_reminders_enabled":true}' \
-    "$(_vk_origin)/api/v1/user/settings/general" >/dev/null 2>&1 ||
-    echo "提醒邮件偏好没打开（设置端点报错，继续等投递）"
+  # 升级不回填；新用户由 config.yml 的 defaultsettings 默认开。测试前置：把主人的偏好直接在
+  # 库里打开（应用设置端点对探针的请求回 412，会话和 Bearer 两种认证都拒），等价于用户去
+  # 设置里打开。升级路径的这个缺口记在 PR 说明里。
+  local db
+  db="$(ls "${WONTON_APP_DATA:-/nonexistent}"/db/*.db 2>/dev/null | head -1)"
+  if [[ -n "$db" ]] && command -v sqlite3 >/dev/null; then
+    sqlite3 "$db" "UPDATE users SET email_reminders_enabled=1 WHERE username='$SMOKE_OWNER';" ||
+      echo "主人的提醒邮件偏好没打开（sqlite 更新失败，继续等投递）"
+  else
+    echo "提醒邮件偏好没法开（没找到库或 sqlite3），继续等投递"
+  fi
 
   marker="提醒-$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
   project="$(curl -sS --noproxy '*' --fail-with-body -b "$SMOKE_JAR" -X PUT \
