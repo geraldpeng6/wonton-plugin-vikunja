@@ -95,7 +95,8 @@ running_container() {
 # `plugin check` 输出的第一行去掉“插件 ”，即“<ID> <版本>”。有不合格的地方时 check 的退出码是 1，第一行照常有；
 # 插件包解析不了时为空。
 manifest_line() {
-  { in_core "$root" plugin check /plugin 2>/dev/null || true; } | sed -n '1s/^插件 //p'
+  # 新核心 plugin check 开头多一行 image_worker 的 INFO 日志，不能只看第一行。
+  { in_core "$root" plugin check /plugin 2>/dev/null || true; } | grep -m1 '^插件 ' | sed 's/^插件 //'
 }
 
 plugin_id() {
