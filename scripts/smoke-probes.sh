@@ -158,7 +158,7 @@ _delivered_after() { # <插件 id> <发送时刻毫秒>：发送之后投进主�
 }
 
 extra_check() { # 邮件专项：建一个 90 秒后提醒的任务，等提醒信出现、再等核心投进私聊后取走
-  local token marker project_id task reminder out db
+  local token marker project_id task reminder out src dbfile
   [[ -n "${SMOKE_JAR:-}" && -n "${SMOKE_WEB_URL:-}" && -n "${SMOKE_OWNER:-}" ]] ||
     { echo "缺冒烟变量：需要 SMOKE_JAR/SMOKE_WEB_URL/SMOKE_OWNER" >&2; return 1; }
   token="$(vk_token)" || { echo "拿不到应用令牌" >&2; return 1; }
@@ -167,15 +167,28 @@ extra_check() { # 邮件专项：建一个 90 秒后提醒的任务，等提醒�
   local owner_email="$SMOKE_OWNER@wonton.internal"
   # 提醒邮件受用户偏好 email_reminders_enabled 控制：0.3.0 前建的账号默认关（当时的上游默认），
   # 升级不回填；新用户由 config.yml 的 defaultsettings 默认开。测试前置：把主人的偏好直接在
-  # 库里打开（应用设置端点对探针的请求回 412，会话和 Bearer 两种认证都拒），等价于用户去
-  # 设置里打开。升级路径的这个缺口记在 PR 说明里。
-  local db
-  db="$(ls "${WONTON_APP_DATA:-/nonexistent}"/db/*.db 2>/dev/null | head -1)"
-  if [[ -n "$db" ]] && command -v sqlite3 >/dev/null; then
-    sqlite3 "$db" "UPDATE users SET email_reminders_enabled=1 WHERE username='$SMOKE_OWNER';" ||
-      echo "主人的提醒邮件偏好没打开（sqlite 更新失败，继续等投递）"
+  # 库里打开（应用设置端点对探针请求回 412，会话和 Bearer 两种认证都拒），等价于用户去设置
+  # 里打开。升级路径的这个缺口记在 PR 说明里。库路径从容器挂载点解析（探针环境没有
+  # WONTON_APP_DATA）；更新用 python3 的 sqlite3（runner 不一定装 sqlite3 命令行）。
+  local src dbfile
+  src="$(docker inspect "$(_vk_container)" --format \
+    '{{range .Mounts}}{{if eq .Destination "/db"}}{{.Source}}{{end}}{{end}}' 2>/dev/null)"
+  dbfile="$(ls "$src"/*.db 2>/dev/null | head -1)"
+  if [[ -n "$dbfile" ]]; then
+    if python3 - "$dbfile" "$SMOKE_OWNER" <<'PY'
+import sqlite3, sys
+
+con = sqlite3.connect(sys.argv[1])
+con.execute("UPDATE users SET email_reminders_enabled=1 WHERE username=?", (sys.argv[2],))
+con.commit()
+PY
+    then
+      echo "已把主人的提醒邮件偏好打开"
+    else
+      echo "提醒邮件偏好没法开（python3/sqlite 更新失败），继续等投递"
+    fi
   else
-    echo "提醒邮件偏好没法开（没找到库或 sqlite3），继续等投递"
+    echo "提醒邮件偏好没法开（没找到应用数据库），继续等投递"
   fi
 
   marker="提醒-$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
