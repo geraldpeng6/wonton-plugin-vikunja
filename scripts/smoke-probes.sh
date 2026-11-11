@@ -138,6 +138,23 @@ _ours_in_mailpit() { # <owner 邮箱>：Vikunja 发的、还没被核心取走�
     [.messages[] | select((.From.Address == $f) and ([.To[].Address] | index($t)))] | length'
 }
 
+wonton_chat_events() { # <条数>：核心投递事件的房间最近消息。核心实测亚秒取走信件（投完即删），
+  # 在 Mailpit 里几乎抓不到中间态，投进主人 Wonton 私聊的房间事件才是权威证据。
+  local mu room adm
+  mu="$(docker exec "$(core_container)" printenv WONTON_MATRIX_URL)"
+  room="$(docker exec "$(core_container)" sh -c 'cat "$WONTON_DATA_DIR/core/matrix-notice-room"')" ||
+    { echo "读不到通知房间 id"; return 1; }
+  adm="$(docker exec "$(core_container)" sh -c 'cat "$WONTON_DATA_DIR/core/matrix-admin-token"')" ||
+    { echo "读不到 Matrix 管理令牌"; return 1; }
+  docker run --rm --network "container:$(core_container)" curlimages/curl:8.23.0 --noproxy '*' -s \
+    -H "Authorization: Bearer $adm" "$mu/_matrix/client/v3/rooms/$room/messages?limit=$1&dir=b"
+}
+
+_delivered_after() { # <插件 id> <发送时刻毫秒>：发送之后投进主人 Wonton 私聊的新邮件事件数
+  wonton_chat_events 30 | jq -r --arg p "$1" --argjson ts "$2" '
+    [.chunk[] | select(.origin_server_ts > $ts and .content["app.wonton.plugin_mail"].plugin_id == $p)] | length'
+}
+
 extra_check() { # 邮件专项：建一个 90 秒后提醒的任务，等提醒信出现、再等核心投进私聊后取走
   local token marker project_id task reminder out
   [[ -n "${SMOKE_JAR:-}" && -n "${SMOKE_WEB_URL:-}" && -n "${SMOKE_OWNER:-}" ]] ||
@@ -163,21 +180,20 @@ extra_check() { # 邮件专项：建一个 90 秒后提醒的任务，等提醒�
   [[ -n "$task_id" ]] || { echo "建任务没回 id：$task"; return 1; }
   echo "建了任务 $task_id，提醒 $reminder（收件人 $owner_email）"
 
-  # 等信出现：提醒 cron 到点后由 mailer 发出（默认的主题来自通知标题翻译，按 From+To 认）。
-  # 出现后再等核心投进私聊并从 Mailpit 删掉（投递成功才删）：数量回到 0 就是投走了。
-  local seen=0 i
+  # 等投递：提醒 cron 到点后由 mailer 发出，核心亚秒取走——直接等主人私聊里的投递事件。
+  local seen=0 i sent_at
+  sent_at="$(date +%s%3N)"
   for i in {1..60}; do
     sleep 5
-    out="$(_ours_in_mailpit "$owner_email")" || { echo "$out"; return 1; }
+    out="$(_delivered_after io.vikunja.vikunja "$sent_at")" || { echo "$out"; return 1; }
     if [[ "$out" != 0 ]]; then seen=1; break; fi
   done
-  [[ "$seen" == 1 ]] || { echo "等了 5 分钟没看到提醒信进 Mailpit（提醒没触发或 mailer 没发）"; return 1; }
-  echo "提醒信进了 Mailpit"
-  for i in {1..24}; do
+  [[ "$seen" == 1 ]] || { echo "等了 5 分钟没看到提醒信投进主人的 Wonton 私聊（提醒没触发或 mailer 没发）"; return 1; }
+  for i in {1..12}; do
     sleep 5
     out="$(_ours_in_mailpit "$owner_email")" || { echo "$out"; return 1; }
     [[ "$out" == 0 ]] && break
-    [[ "$i" == 24 ]] && { echo "等了 2 分钟信还在 Mailpit，核心没取走（投递失败？）"; return 1; }
+    [[ "$i" == 12 ]] && { echo "信投进了私聊，但 Mailpit 里还有滞留（核心没删？）"; return 1; }
   done
-  echo "提醒信已被核心投进主人的 Wonton 私聊（Mailpit 里删了）"
+  echo "提醒信已投进主人的 Wonton 私聊，Mailpit 没有滞留"
 }
