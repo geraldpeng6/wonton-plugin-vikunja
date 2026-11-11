@@ -171,7 +171,8 @@ extra_check() { # 邮件专项：建一个 90 秒后提醒的任务，等提醒�
   # 里打开。升级路径的这个缺口记在 PR 说明里。库路径从容器挂载点解析（探针环境没有
   # WONTON_APP_DATA）；更新用 python3 的 sqlite3（runner 不一定装 sqlite3 命令行）。
   local src dbfile
-  src="$(docker inspect "$(_vk_container)" --format \
+  # 应用容器：按实例名拼（e2e 起的栈容器名固定形状，服务名 vikunja），拿 /db 的宿主挂载点。
+  src="$(docker inspect "wonton-${SMOKE_INSTANCE:?}--io-vikunja-vikunja--vikunja" --format \
     '{{range .Mounts}}{{if eq .Destination "/db"}}{{.Source}}{{end}}{{end}}' 2>/dev/null)"
   dbfile="$(ls "$src"/*.db 2>/dev/null | head -1)"
   if [[ -n "$dbfile" ]]; then
