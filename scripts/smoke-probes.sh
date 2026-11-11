@@ -158,7 +158,7 @@ _delivered_after() { # <插件 id> <发送时刻毫秒>：发送之后投进主�
 }
 
 extra_check() { # 邮件专项：建一个 90 秒后提醒的任务，等提醒信出现、再等核心投进私聊后取走
-  local token marker project_id task reminder out src dbfile
+  local token marker project_id task reminder out src dbfile seen i attempt
   [[ -n "${SMOKE_JAR:-}" && -n "${SMOKE_WEB_URL:-}" && -n "${SMOKE_OWNER:-}" ]] ||
     { echo "缺冒烟变量：需要 SMOKE_JAR/SMOKE_WEB_URL/SMOKE_OWNER" >&2; return 1; }
   token="$(vk_token)" || { echo "拿不到应用令牌" >&2; return 1; }
@@ -208,14 +208,30 @@ PY
   echo "建了任务 $task_id，提醒 $reminder（收件人 $owner_email）"
 
   # 等投递：提醒 cron 到点后由 mailer 发出，核心亚秒取走——直接等主人私聊里的投递事件。
-  local seen=0 i sent_at
-  sent_at="$(date +%s%3N)"
-  for i in {1..60}; do
-    sleep 5
-    out="$(_delivered_after io.vikunja.vikunja "$sent_at")" || { echo "$out"; return 1; }
-    if [[ "$out" != 0 ]]; then seen=1; break; fi
+  # 核心的收信事件连接断开重连期间受理的信会丢（SMTP 250 但不投递、Mailpit 也没滞留，见
+  # 底座的问题）：第一次 5 分钟没到就再建一个提醒任务（再给 90 秒 + 5 分钟），第二次才算数。
+
+  for attempt in 1 2; do
+    if [[ "$attempt" == 2 ]]; then
+      reminder="$(python3 -c 'import datetime;print((datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(seconds=90)).isoformat())')"
+      marker="$marker-重试"
+      task="$(curl -sS --noproxy '*' --fail-with-body -b "$SMOKE_JAR" -X PUT \
+        -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
+        -d "{\"title\":\"$marker\",\"reminders\":[{\"reminder\":\"$reminder\"}]}" \
+        "$(_vk_origin)/api/v1/projects/$project_id/tasks")" ||
+        { echo "重试建任务失败：$task"; return 1; }
+      task_id="$(jq -r '.id // empty' <<<"$task")"
+      echo "第二次建了任务 $task_id，提醒 $reminder"
+    fi
+    sent_at="$(date +%s%3N)"
+    for i in {1..60}; do
+      sleep 5
+      out="$(_delivered_after io.vikunja.vikunja "$sent_at")" || { echo "$out"; return 1; }
+      if [[ "$out" != 0 ]]; then seen=1; break; fi
+    done
+    [[ "$seen" == 1 ]] && break
   done
-  [[ "$seen" == 1 ]] || { echo "等了 5 分钟没看到提醒信投进主人的 Wonton 私聊（提醒没触发或 mailer 没发）"; return 1; }
+  [[ "$seen" == 1 ]] || { echo "两次提醒都没看到信投进主人的 Wonton 私聊（提醒没触发或 mailer 没发，或核心收信事件断线窗口丢信）"; return 1; }
   for i in {1..12}; do
     sleep 5
     out="$(_ours_in_mailpit "$owner_email")" || { echo "$out"; return 1; }
