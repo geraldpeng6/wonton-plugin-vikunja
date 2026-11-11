@@ -141,10 +141,12 @@ _ours_in_mailpit() { # <owner 邮箱>：Vikunja 发的、还没被核心取走�
 wonton_chat_events() { # <条数>：核心投递事件的房间最近消息。核心实测亚秒取走信件（投完即删），
   # 在 Mailpit 里几乎抓不到中间态，投进主人 Wonton 私聊的房间事件才是权威证据。
   local mu room adm
-  mu="$(docker exec "$(core_container)" printenv WONTON_MATRIX_URL)"
-  room="$(docker exec "$(core_container)" sh -c 'cat "$WONTON_DATA_DIR/core/matrix-notice-room"')" ||
-    { echo "读不到通知房间 id"; return 1; }
-  adm="$(docker exec "$(core_container)" sh -c 'cat "$WONTON_DATA_DIR/core/matrix-admin-token"')" ||
+  mu="$(docker exec "$(core_container)" printenv WONTON_MATRIX_URL)" || { echo "读不到 Matrix 地址"; return 1; }
+  # 通知房间是第一封信投递时才建的：一封信都还没投过时读不到文件，按 0 条投递算
+  # （_delivered_after 的轮询会等它出现），不当错误。
+  room="$(docker exec "$(core_container)" sh -c 'cat "$WONTON_DATA_DIR/core/matrix-notice-room"' 2>/dev/null)" ||
+    { echo '{"chunk":[]}'; return 0; }
+  adm="$(docker exec "$(core_container)" sh -c 'cat "$WONTON_DATA_DIR/core/matrix-admin-token"' 2>/dev/null)" ||
     { echo "读不到 Matrix 管理令牌"; return 1; }
   docker run --rm --network "container:$(core_container)" curlimages/curl:8.23.0 --noproxy '*' -s \
     -H "Authorization: Bearer $adm" "$mu/_matrix/client/v3/rooms/$room/messages?limit=$1&dir=b"
