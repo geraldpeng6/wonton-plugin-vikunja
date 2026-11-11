@@ -6,7 +6,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 state="${WONTON_DEV_STATE:-$root/.wonton}"
 env_file="$state/.env"
 # 没有开发环境时，检查和打包用这个核心镜像：main 每次合并都会更新，插件跟着主干的规范走，不等发版。
-default_image="ghcr.io/geraldpeng6/wonton-core:main"
+default_image="ghcr.io/wontonapp/wonton-core:main"
 
 die() {
   echo "$*" >&2
@@ -95,7 +95,8 @@ running_container() {
 # `plugin check` 输出的第一行去掉“插件 ”，即“<ID> <版本>”。有不合格的地方时 check 的退出码是 1，第一行照常有；
 # 插件包解析不了时为空。
 manifest_line() {
-  { in_core "$root" plugin check /plugin 2>/dev/null || true; } | sed -n '1s/^插件 //p'
+  # 新核心 plugin check 开头多一行 image_worker 的 INFO 日志，不能只看第一行。
+  { in_core "$root" plugin check /plugin 2>/dev/null || true; } | grep -m1 '^插件 ' | sed 's/^插件 //'
 }
 
 plugin_id() {

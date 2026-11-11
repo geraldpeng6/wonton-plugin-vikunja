@@ -10,8 +10,12 @@ services:
     user: "1000:1000"
     environment:
       TZ: ${TZ}
-      # Vikunja 建账号、发邀请和提醒都用邮箱；没填邮箱的用户装不上，不去等登录时才失败。
-      WONTON_OWNER_EMAIL: ${WONTON_OWNER_EMAIL:?需要用户邮箱}
+      # 发信（notify）：核心的内部 SMTP 不宣告 STARTTLS，Vikunja 的机会性 TLS 保持明文；
+      # 不填用户名密码，避免 Go 的 PlainAuth 在明文连接上拒绝认证。信转进收件人的 Wonton 私聊。
+      VIKUNJA_MAILER_ENABLED: "true"
+      VIKUNJA_MAILER_HOST: ${WONTON_SMTP_HOST}
+      VIKUNJA_MAILER_PORT: ${WONTON_SMTP_PORT}
+      VIKUNJA_MAILER_FROMEMAIL: ${WONTON_MAIL_FROM}
     volumes:
       # SQLite 库和附件。
       - ${WONTON_APP_DATA}/db:/db
@@ -45,6 +49,8 @@ configs:
       defaultsettings:
         language: zh-CN
         timezone: ${TZ}
+        # 提醒邮件也进 Wonton 私聊，新建用户默认开；上游对外部邮箱默认关是怕扰人。
+        email_reminders_enabled: true
       auth:
         local:
           enabled: false
@@ -59,9 +65,9 @@ configs:
               requireavailability: true
 
 x-wonton:
-  spec: "0.4"
+  spec: "0.11"
   id: io.vikunja.vikunja
-  version: 0.2.0
+  version: 0.3.0
   kind: app
   title: { zh: Vikunja, en: Vikunja }
   description:
@@ -81,13 +87,15 @@ x-wonton:
       待办和任务管理：清单、任务、截止日期、标签、优先级和看板，进度一眼看到。
 
       登录用云吞的账号，打开就在里面，不用再注册或设密码。
+
+      应用发的信（任务提醒、评论和 @ 提到等通知）会出现在你的 Wonton 私聊里。
     en: |
       Todo and task management: lists, tasks, due dates, labels, priorities and kanban boards, so progress is visible at a glance.
 
       Sign-in uses your Wonton account; the app opens straight into your work, with no second sign-up or password.
-  release_notes:
-    zh: "上游 Vikunja 升到 2.8.0：修复 19 个安全问题，新增回收站和撤销；升级自动迁移数据，已有任务会重新订阅创建者和被指派人。"
-    en: "Upstream Vikunja bumped to 2.8.0: 19 security fixes, new trash bin with undo; data migrates automatically during the upgrade — existing tasks get their creators and assignees re-subscribed."
+
+      Emails the app sends (task reminders, comments and @-mentions) arrive in your Wonton chat.
+  release_notes: { zh: "应用发的信接进云吞：任务提醒、评论和 @ 提到等通知转进收件人的 Wonton 私聊。", en: "Emails the app sends now arrive in Wonton: task reminders, comments and @-mentions land in the recipient's Wonton chat." }
   webui:
     service: vikunja
     port: 3456
@@ -100,7 +108,8 @@ x-wonton:
     service_secret:
       generate: { bytes: 32 }
   permissions:
-    - owner.identity
+    # 提醒和通知信经核心的内部 SMTP 转进收件人的 Wonton 私聊。
+    - notify
     # Webhook、链接预览和 CalDAV 客户端要出网；出网时核心给内部地址写好 NO_PROXY，
     # 应用访问核心的 OIDC 才不被宿主代理挡住。
     - network.egress

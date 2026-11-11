@@ -117,3 +117,127 @@ data_check() {
   [[ "$(jq -r '.title // empty' <<<"$seen")" == "$marker" ]] ||
     { echo "任务对不上：期待标题 $marker（id $task_id），看到 $(jq -c '{id,title}' <<<"$seen" 2>/dev/null || head -c 200 <<<"$seen")"; return 1; }
 }
+
+# ---------- 邮件（notify）：真发一封提醒信，核对核心投进私聊（extra_check 由 e2e 冒烟跑） ----------
+
+core_container() { # 核心容器：实例名拼（e2e 起的栈核心容器名固定这个形状）
+  printf '%s' "wonton-${SMOKE_INSTANCE:?}--core"
+}
+
+mailpit_messages() { # 经核心的网络栈读 Mailpit 收件箱 API（SMTP 25/HTTP 8025 都不发布到宿主）。
+  # API 要 Basic 认证（core:<密钥>，密钥在核心数据目录，核心的 mailbox 组件生成）。
+  local pwd
+  pwd="$(docker exec "$(core_container)" sh -c 'cat "$WONTON_DATA_DIR/core/mailpit/api-password"')" ||
+    { echo "读不到 Mailpit API 密钥"; return 1; }
+  docker run --rm --network "container:$(core_container)" curlimages/curl:8.23.0 --noproxy '*' -s \
+    -u "core:$pwd" "http://mailpit.wonton.internal:8025/api/v1/messages?limit=50"
+}
+
+_ours_in_mailpit() { # <owner 邮箱>：Vikunja 发的、还没被核心取走的信（From 是注入的发件地址）
+  mailpit_messages | jq -r --arg f "io.vikunja.vikunja@plugins.wonton.internal" --arg t "$1" '
+    [.messages[] | select((.From.Address == $f) and ([.To[].Address] | index($t)))] | length'
+}
+
+wonton_chat_events() { # <条数>：核心投递事件的房间最近消息。核心实测亚秒取走信件（投完即删），
+  # 在 Mailpit 里几乎抓不到中间态，投进主人 Wonton 私聊的房间事件才是权威证据。
+  local mu room adm
+  mu="$(docker exec "$(core_container)" printenv WONTON_MATRIX_URL)" || { echo "读不到 Matrix 地址"; return 1; }
+  # 通知房间是第一封信投递时才建的：一封信都还没投过时读不到文件，按 0 条投递算
+  # （_delivered_after 的轮询会等它出现），不当错误。
+  room="$(docker exec "$(core_container)" sh -c 'cat "$WONTON_DATA_DIR/core/matrix-notice-room"' 2>/dev/null)" ||
+    { echo '{"chunk":[]}'; return 0; }
+  adm="$(docker exec "$(core_container)" sh -c 'cat "$WONTON_DATA_DIR/core/matrix-admin-token"' 2>/dev/null)" ||
+    { echo "读不到 Matrix 管理令牌"; return 1; }
+  docker run --rm --network "container:$(core_container)" curlimages/curl:8.23.0 --noproxy '*' -s \
+    -H "Authorization: Bearer $adm" "$mu/_matrix/client/v3/rooms/$room/messages?limit=$1&dir=b"
+}
+
+_delivered_after() { # <插件 id> <发送时刻毫秒>：发送之后投进主人 Wonton 私聊的新邮件事件数
+  wonton_chat_events 30 | jq -r --arg p "$1" --argjson ts "$2" '
+    [.chunk[] | select(.origin_server_ts > $ts and .content["app.wonton.plugin_mail"].plugin_id == $p)] | length'
+}
+
+extra_check() { # 邮件专项：建一个 90 秒后提醒的任务，等提醒信出现、再等核心投进私聊后取走
+  local token marker project_id task reminder out src dbfile seen i attempt
+  [[ -n "${SMOKE_JAR:-}" && -n "${SMOKE_WEB_URL:-}" && -n "${SMOKE_OWNER:-}" ]] ||
+    { echo "缺冒烟变量：需要 SMOKE_JAR/SMOKE_WEB_URL/SMOKE_OWNER" >&2; return 1; }
+  token="$(vk_token)" || { echo "拿不到应用令牌" >&2; return 1; }
+  # 收件人是主人的内部邮箱（<用户名>@wonton.internal，规范固定的形状；冒烟工具按形状拼，应用不发它
+  # 之外的收件人）。Vikunja 的收件人只能来自 OIDC 的 email 声明，没有发外部地址的功能可触发。
+  local owner_email="$SMOKE_OWNER@wonton.internal"
+  # 提醒邮件受用户偏好 email_reminders_enabled 控制：0.3.0 前建的账号默认关（当时的上游默认），
+  # 升级不回填；新用户由 config.yml 的 defaultsettings 默认开。测试前置：把主人的偏好直接在
+  # 库里打开（应用设置端点对探针请求回 412，会话和 Bearer 两种认证都拒），等价于用户去设置
+  # 里打开。升级路径的这个缺口记在 PR 说明里。库路径从容器挂载点解析（探针环境没有
+  # WONTON_APP_DATA）；更新用 python3 的 sqlite3（runner 不一定装 sqlite3 命令行）。
+  local src dbfile
+  # 应用容器：按实例名拼（e2e 起的栈容器名固定形状，服务名 vikunja），拿 /db 的宿主挂载点。
+  src="$(docker inspect "wonton-${SMOKE_INSTANCE:?}--io-vikunja-vikunja--vikunja" --format \
+    '{{range .Mounts}}{{if eq .Destination "/db"}}{{.Source}}{{end}}{{end}}' 2>/dev/null)"
+  dbfile="$(find "$src" -maxdepth 1 -name '*.db' 2>/dev/null | head -1)"
+  if [[ -n "$dbfile" ]]; then
+    if python3 - "$dbfile" "$SMOKE_OWNER" <<'PY'
+import sqlite3, sys
+
+con = sqlite3.connect(sys.argv[1])
+con.execute("UPDATE users SET email_reminders_enabled=1 WHERE username=?", (sys.argv[2],))
+con.commit()
+PY
+    then
+      echo "已把主人的提醒邮件偏好打开"
+    else
+      echo "提醒邮件偏好没法开（python3/sqlite 更新失败），继续等投递"
+    fi
+  else
+    echo "提醒邮件偏好没法开（没找到应用数据库），继续等投递"
+  fi
+
+  marker="提醒-$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
+  project="$(curl -sS --noproxy '*' --fail-with-body -b "$SMOKE_JAR" -X PUT \
+    -H "Authorization: Bearer $token" -H 'Content-Type: application/json' -d "{\"title\":\"$marker\"}" \
+    "$(_vk_origin)/api/v1/projects")" || { echo "建项目失败：$project"; return 1; }
+  project_id="$(jq -r '.id // empty' <<<"$project")"
+  [[ -n "$project_id" ]] || { echo "建项目没回 id：$project"; return 1; }
+  # 提醒时间 = 现在 + 90 秒（提醒的 cron 每分钟跑一次，查「本分钟到期」的提醒）
+  reminder="$(python3 -c 'import datetime;print((datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(seconds=90)).isoformat())')"
+  task="$(curl -sS --noproxy '*' --fail-with-body -b "$SMOKE_JAR" -X PUT \
+    -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
+    -d "{\"title\":\"$marker\",\"reminders\":[{\"reminder\":\"$reminder\"}]}" \
+    "$(_vk_origin)/api/v1/projects/$project_id/tasks")" || { echo "建任务失败：$task"; return 1; }
+  task_id="$(jq -r '.id // empty' <<<"$task")"
+  [[ -n "$task_id" ]] || { echo "建任务没回 id：$task"; return 1; }
+  echo "建了任务 $task_id，提醒 $reminder（收件人 $owner_email）"
+
+  # 等投递：提醒 cron 到点后由 mailer 发出，核心亚秒取走——直接等主人私聊里的投递事件。
+  # 核心的收信事件连接断开重连期间受理的信会丢（SMTP 250 但不投递、Mailpit 也没滞留，见
+  # 底座的问题）：第一次 5 分钟没到就再建一个提醒任务（再给 90 秒 + 5 分钟），第二次才算数。
+  seen=0
+  for attempt in 1 2; do
+    if [[ "$attempt" == 2 ]]; then
+      reminder="$(python3 -c 'import datetime;print((datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(seconds=90)).isoformat())')"
+      marker="$marker-重试"
+      task="$(curl -sS --noproxy '*' --fail-with-body -b "$SMOKE_JAR" -X PUT \
+        -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
+        -d "{\"title\":\"$marker\",\"reminders\":[{\"reminder\":\"$reminder\"}]}" \
+        "$(_vk_origin)/api/v1/projects/$project_id/tasks")" ||
+        { echo "重试建任务失败：$task"; return 1; }
+      task_id="$(jq -r '.id // empty' <<<"$task")"
+      echo "第二次建了任务 $task_id，提醒 $reminder"
+    fi
+    sent_at="$(date +%s%3N)"
+    for i in {1..60}; do
+      sleep 5
+      out="$(_delivered_after io.vikunja.vikunja "$sent_at")" || { echo "$out"; return 1; }
+      if [[ "$out" != 0 ]]; then seen=1; break; fi
+    done
+    [[ "$seen" == 1 ]] && break
+  done
+  [[ "$seen" == 1 ]] || { echo "两次提醒都没看到信投进主人的 Wonton 私聊（提醒没触发或 mailer 没发，或核心收信事件断线窗口丢信）"; return 1; }
+  for i in {1..12}; do
+    sleep 5
+    out="$(_ours_in_mailpit "$owner_email")" || { echo "$out"; return 1; }
+    [[ "$out" == 0 ]] && break
+    [[ "$i" == 12 ]] && { echo "信投进了私聊，但 Mailpit 里还有滞留（核心没删？）"; return 1; }
+  done
+  echo "提醒信已投进主人的 Wonton 私聊，Mailpit 没有滞留"
+}
