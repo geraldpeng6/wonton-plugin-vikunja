@@ -166,9 +166,9 @@ extra_check() { # 邮件专项：建一个 90 秒后提醒的任务，等提醒�
   # 之外的收件人）。Vikunja 的收件人只能来自 OIDC 的 email 声明，没有发外部地址的功能可触发。
   local owner_email="$SMOKE_OWNER@wonton.internal"
   # 提醒邮件受用户偏好 email_reminders_enabled 控制：0.3.0 前建的账号默认关（当时的上游默认），
-  # 升级不回填。测试前置：试着给主人打开；设置端点拒了不挡路——提醒没到时连这个一起报，
-  # 升级路径的这个缺口记在 PR 说明里。
-  curl -sS --noproxy '*' --fail-with-body -b "$SMOKE_JAR" -X POST \
+  # 升级不回填。测试前置：给主人打开。这个路由带 cookie 会触发 412（CSRF 检查按会话请求算），
+  # 只用 API token（Bearer）不带 cookie；拒了不挡路，提醒没到时连原因一起报。
+  curl -sS --noproxy '*' --fail-with-body -X POST \
     -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
     -d '{"email_reminders_enabled":true}' \
     "$(_vk_origin)/api/v1/user/settings/general" >/dev/null 2>&1 ||
