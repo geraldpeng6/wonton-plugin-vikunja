@@ -69,10 +69,10 @@ x-wonton:
   id: io.vikunja.vikunja
   version: 0.3.0
   kind: app
-  title: { zh: Vikunja, en: Vikunja }
+  title: { zh: 待办清单（Vikunja）, en: To-Do Lists (Vikunja) }
   description:
-    zh: 列待办清单、分派任务、设截止日期，用看板推进
-    en: Lists, tasks, due dates and kanban boards to get things done
+    zh: 像贴满便利贴的任务墙：把要做的事列成清单、设截止日期、和家人分工，做完拖到“完成”那栏；快到期会在云吞私聊里提醒你。
+    en: "Like a wall of sticky notes: list what needs doing, set due dates, split the work with family and drag tasks to Done; reminders arrive in your Wonton chat."
   icon: icon.png
   notices: [NOTICE]
   screenshots: [screenshots/tasks.png]
