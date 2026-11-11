@@ -92,11 +92,10 @@ running_container() {
   grep -x -m1 -E "$1(--[a-z0-9-]+)?" <<<"$names"
 }
 
-# `plugin check` 输出的第一行去掉“插件 ”，即“<ID> <版本>”。有不合格的地方时 check 的退出码是 1，第一行照常有；
-# 插件包解析不了时为空。
+# `plugin check` 输出里的「插件 <ID> <版本>」行去掉前缀。核心 4cdfe16 前后会先打一行 tracing
+# （图片助手启动），清单行不再固定是第一行：在全部输出里找。
 manifest_line() {
-  # 新核心 plugin check 开头多一行 image_worker 的 INFO 日志，不能只看第一行。
-  { in_core "$root" plugin check /plugin 2>/dev/null || true; } | grep -m1 '^插件 ' | sed 's/^插件 //'
+  { in_core "$root" plugin check /plugin 2>/dev/null || true; } | sed -n 's/^插件 //p' | head -1
 }
 
 plugin_id() {
