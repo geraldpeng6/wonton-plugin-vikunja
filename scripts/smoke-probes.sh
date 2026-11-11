@@ -166,13 +166,13 @@ extra_check() { # 邮件专项：建一个 90 秒后提醒的任务，等提醒�
   # 之外的收件人）。Vikunja 的收件人只能来自 OIDC 的 email 声明，没有发外部地址的功能可触发。
   local owner_email="$SMOKE_OWNER@wonton.internal"
   # 提醒邮件受用户偏好 email_reminders_enabled 控制：0.3.0 前建的账号默认关（当时的上游默认），
-  # 升级不回填。测试前置：给主人打开（新用户由清单 defaultsettings 默认开；老用户要自己在
-  # 设置里开，升级路径的这个缺口记在 PR 说明里）。
+  # 升级不回填。测试前置：试着给主人打开；设置端点拒了不挡路——提醒没到时连这个一起报，
+  # 升级路径的这个缺口记在 PR 说明里。
   curl -sS --noproxy '*' --fail-with-body -b "$SMOKE_JAR" -X POST \
     -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
     -d '{"email_reminders_enabled":true}' \
-    "$(_vk_origin)/api/v1/user/settings/general" >/dev/null ||
-    { echo "打不开主人的提醒邮件偏好"; return 1; }
+    "$(_vk_origin)/api/v1/user/settings/general" >/dev/null 2>&1 ||
+    echo "提醒邮件偏好没打开（设置端点报错，继续等投递）"
 
   marker="提醒-$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
   project="$(curl -sS --noproxy '*' --fail-with-body -b "$SMOKE_JAR" -X PUT \
