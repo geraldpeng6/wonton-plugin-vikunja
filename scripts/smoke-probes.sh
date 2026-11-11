@@ -174,7 +174,7 @@ extra_check() { # 邮件专项：建一个 90 秒后提醒的任务，等提醒�
   # 应用容器：按实例名拼（e2e 起的栈容器名固定形状，服务名 vikunja），拿 /db 的宿主挂载点。
   src="$(docker inspect "wonton-${SMOKE_INSTANCE:?}--io-vikunja-vikunja--vikunja" --format \
     '{{range .Mounts}}{{if eq .Destination "/db"}}{{.Source}}{{end}}{{end}}' 2>/dev/null)"
-  dbfile="$(ls "$src"/*.db 2>/dev/null | head -1)"
+  dbfile="$(find "$src" -maxdepth 1 -name '*.db' 2>/dev/null | head -1)"
   if [[ -n "$dbfile" ]]; then
     if python3 - "$dbfile" "$SMOKE_OWNER" <<'PY'
 import sqlite3, sys
