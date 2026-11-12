@@ -76,10 +76,6 @@ identity_check() {
 # 标记写进 $SMOKE_STATE；升级/重装后按 id 读回来核对标题。只依赖契约变量（SMOKE_JAR/SMOKE_WEB_URL/
 # SMOKE_BASE/SMOKE_TOKEN/SMOKE_STATE）。接口形状按 v2.8.0 的 swagger：
 # PUT /api/v1/projects、PUT /api/v1/projects/{id}/tasks。
-marker_file() { # SMOKE_STATE 在套件里是状态目录（e2e 传的是标记文件本身），标记放对应路径
-  if [[ -d "$SMOKE_STATE" ]]; then printf '%s' "$SMOKE_STATE/vikunja-marker"; else printf '%s' "${SMOKE_STATE}.marker"; fi
-}
-
 data_write() {
   local token marker project project_id task task_id
   [[ -n "${SMOKE_JAR:-}" && -n "${SMOKE_WEB_URL:-}" ]] ||
@@ -97,14 +93,14 @@ data_write() {
   task_id="$(jq -r '.id // empty' <<<"$task")"
   [[ -n "$task_id" ]] || { echo "建任务没回 id：$task"; return 1; }
   jq -nc --arg m "$marker" --arg p "$project_id" --arg t "$task_id" \
-    '{marker:$m,project_id:$p,task_id:$t}' >"$(marker_file)"
+    '{marker:$m,project_id:$p,task_id:$t}' >"$SMOKE_STATE"
 }
 
 data_check() {
   local token marker project_id task_id seen
-  marker="$(jq -r .marker "$(marker_file)")"
-  project_id="$(jq -r .project_id "$(marker_file)")"
-  task_id="$(jq -r .task_id "$(marker_file)")"
+  marker="$(jq -r .marker "$SMOKE_STATE")"
+  project_id="$(jq -r .project_id "$SMOKE_STATE")"
+  task_id="$(jq -r .task_id "$SMOKE_STATE")"
   token="$(vk_token)" || { echo "拿不到应用令牌，查不了数据" >&2; return 1; }
   seen="$(curl -sS --noproxy '*' -b "$SMOKE_JAR" -H "Authorization: Bearer $token" \
     "$(_vk_origin)/api/v1/projects/$project_id")" ||
@@ -118,18 +114,14 @@ data_check() {
     { echo "任务对不上：期待标题 $marker（id $task_id），看到 $(jq -c '{id,title}' <<<"$seen" 2>/dev/null || head -c 200 <<<"$seen")"; return 1; }
 }
 
-# ---------- 邮件（notify）：真发一封提醒信，核对核心投进私聊（extra_check 由 e2e 冒烟跑） ----------
-
-core_container() { # 核心容器：实例名拼（e2e 起的栈核心容器名固定这个形状）
-  printf '%s' "wonton-${SMOKE_INSTANCE:?}--core"
-}
+# ---------- 邮件（notify）：真发一封提醒信，核对核心投进私聊 ----------
 
 mailpit_messages() { # 经核心的网络栈读 Mailpit 收件箱 API（SMTP 25/HTTP 8025 都不发布到宿主）。
   # API 要 Basic 认证（core:<密钥>，密钥在核心数据目录，核心的 mailbox 组件生成）。
   local pwd
-  pwd="$(docker exec "$(core_container)" sh -c 'cat "$WONTON_DATA_DIR/core/mailpit/api-password"')" ||
+  pwd="$(docker exec "$SMOKE_CORE" sh -c 'cat "$WONTON_DATA_DIR/core/mailpit/api-password"')" ||
     { echo "读不到 Mailpit API 密钥"; return 1; }
-  docker run --rm --network "container:$(core_container)" curlimages/curl:8.23.0 --noproxy '*' -s \
+  docker run --rm --network "container:$SMOKE_CORE" curlimages/curl:8.23.0 --noproxy '*' -s \
     -u "core:$pwd" "http://mailpit.wonton.internal:8025/api/v1/messages?limit=50"
 }
 
@@ -141,14 +133,14 @@ _ours_in_mailpit() { # <owner 邮箱>：Vikunja 发的、还没被核心取走�
 wonton_chat_events() { # <条数>：核心投递事件的房间最近消息。核心实测亚秒取走信件（投完即删），
   # 在 Mailpit 里几乎抓不到中间态，投进主人 Wonton 私聊的房间事件才是权威证据。
   local mu room adm
-  mu="$(docker exec "$(core_container)" printenv WONTON_MATRIX_URL)" || { echo "读不到 Matrix 地址"; return 1; }
+  mu="$(docker exec "$SMOKE_CORE" printenv WONTON_MATRIX_URL)" || { echo "读不到 Matrix 地址"; return 1; }
   # 通知房间是第一封信投递时才建的：一封信都还没投过时读不到文件，按 0 条投递算
   # （_delivered_after 的轮询会等它出现），不当错误。
-  room="$(docker exec "$(core_container)" sh -c 'cat "$WONTON_DATA_DIR/core/matrix-notice-room"' 2>/dev/null)" ||
+  room="$(docker exec "$SMOKE_CORE" sh -c 'cat "$WONTON_DATA_DIR/core/matrix-notice-room"' 2>/dev/null)" ||
     { echo '{"chunk":[]}'; return 0; }
-  adm="$(docker exec "$(core_container)" sh -c 'cat "$WONTON_DATA_DIR/core/matrix-admin-token"' 2>/dev/null)" ||
+  adm="$(docker exec "$SMOKE_CORE" sh -c 'cat "$WONTON_DATA_DIR/core/matrix-admin-token"' 2>/dev/null)" ||
     { echo "读不到 Matrix 管理令牌"; return 1; }
-  docker run --rm --network "container:$(core_container)" curlimages/curl:8.23.0 --noproxy '*' -s \
+  docker run --rm --network "container:$SMOKE_CORE" curlimages/curl:8.23.0 --noproxy '*' -s \
     -H "Authorization: Bearer $adm" "$mu/_matrix/client/v3/rooms/$room/messages?limit=$1&dir=b"
 }
 
@@ -158,7 +150,7 @@ _delivered_after() { # <插件 id> <发送时刻毫秒>：发送之后投进主�
 }
 
 extra_check() { # 邮件专项：建一个 90 秒后提醒的任务，等提醒信出现、再等核心投进私聊后取走
-  local token marker project_id task reminder out src dbfile seen i attempt
+  local token marker project_id task reminder out dbfile seen i attempt
   [[ -n "${SMOKE_JAR:-}" && -n "${SMOKE_WEB_URL:-}" && -n "${SMOKE_OWNER:-}" ]] ||
     { echo "缺冒烟变量：需要 SMOKE_JAR/SMOKE_WEB_URL/SMOKE_OWNER" >&2; return 1; }
   token="$(vk_token)" || { echo "拿不到应用令牌" >&2; return 1; }
@@ -168,28 +160,43 @@ extra_check() { # 邮件专项：建一个 90 秒后提醒的任务，等提醒�
   # 提醒邮件受用户偏好 email_reminders_enabled 控制：0.3.0 前建的账号默认关（当时的上游默认），
   # 升级不回填；新用户由 config.yml 的 defaultsettings 默认开。测试前置：把主人的偏好直接在
   # 库里打开（应用设置端点对探针请求回 412，会话和 Bearer 两种认证都拒），等价于用户去设置
-  # 里打开。升级路径的这个缺口记在 PR 说明里。库路径从容器挂载点解析（探针环境没有
-  # WONTON_APP_DATA）；更新用 python3 的 sqlite3（runner 不一定装 sqlite3 命令行）。
-  local src dbfile
-  # 应用容器：按实例名拼（e2e 起的栈容器名固定形状，服务名 vikunja），拿 /db 的宿主挂载点。
-  src="$(docker inspect "wonton-${SMOKE_INSTANCE:?}--io-vikunja-vikunja--vikunja" --format \
-    '{{range .Mounts}}{{if eq .Destination "/db"}}{{.Source}}{{end}}{{end}}' 2>/dev/null)"
-  dbfile="$(find "$src" -maxdepth 1 -name '*.db' 2>/dev/null | head -1)"
-  if [[ -n "$dbfile" ]]; then
-    if python3 - "$dbfile" "$SMOKE_OWNER" <<'PY'
+  # 里打开。升级路径的这个缺口记在 PR 说明里。库在应用容器的 /db；镜像是 distroless（没有
+  # shell，docker exec 进不去），核心镜像也没有 python3/sqlite3，只能 docker cp 把 /db 整目录
+  # 拷出来用跑探针这边的 python3 改，改好放回。仅当库不是 WAL 模式才动：WAL 下容器里还有
+  # 未落盘的 -wal，拷回的库会被重放盖掉，改了也白改。
+  local app_db tmpdir dbfile
+  app_db="$(docker ps --format '{{.Names}}' \
+    --filter label=wonton.plugin=io.vikunja.vikunja --filter label=wonton.service=vikunja \
+    --filter "label=wonton.instance=${SMOKE_INSTANCE//-/}" | head -1)"
+  if [[ -n "$app_db" ]] && tmpdir="$(mktemp -d)" &&
+    docker cp "$app_db:/db/." "$tmpdir/" 2>/dev/null; then
+    dbfile="$(find "$tmpdir" -maxdepth 1 -name '*.db' | head -1)"
+    if [[ -n "$dbfile" && ! -e "$dbfile-wal" ]]; then
+      if python3 - "$dbfile" "$SMOKE_OWNER" <<'PY'
 import sqlite3, sys
 
 con = sqlite3.connect(sys.argv[1])
 con.execute("UPDATE users SET email_reminders_enabled=1 WHERE username=?", (sys.argv[2],))
 con.commit()
 PY
-    then
-      echo "已把主人的提醒邮件偏好打开"
+      then
+        # 应用以 uid 1000 跑，容器里没有 shell 改不了属主：放宽位保证应用写得进
+        if chmod 666 "$dbfile" && docker cp "$dbfile" "$app_db:/db/${dbfile##*/}"; then
+          echo "已把主人的提醒邮件偏好打开"
+        else
+          echo "提醒邮件偏好没法开（改好的库放不回容器），继续等投递"
+        fi
+      else
+        echo "提醒邮件偏好没法开（python3/sqlite 更新失败），继续等投递"
+      fi
+    elif [[ -n "$dbfile" ]]; then
+      echo "库是 WAL 模式，拷出改回会被容器里未落盘的状态盖掉，跳过偏好预置，继续等投递"
     else
-      echo "提醒邮件偏好没法开（python3/sqlite 更新失败），继续等投递"
+      echo "提醒邮件偏好没法开（应用容器的 /db 里没有库文件），继续等投递"
     fi
+    rm -rf "$tmpdir"
   else
-    echo "提醒邮件偏好没法开（没找到应用数据库），继续等投递"
+    echo "提醒邮件偏好没法开（没找到应用容器或拷不出库），继续等投递"
   fi
 
   marker="提醒-$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
