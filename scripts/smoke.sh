@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # 插件合并前的端到端冒烟：用工作区的插件起一套一次性开发环境，六项真实请求，不用 mock。
-#   scripts/dev.sh smoke [--upgrade-from <tag>]
-# 六项：装得上 / 网页打得开 / 用户身份能用 / 工具 Bot 调得到 / 升级保数据 / 重装保数据。任何 FAIL 退出非 0。
-# 插件自己的探测在 scripts/smoke-probes.sh，写法见模板里的这个文件。
+#   scripts/dev.sh smoke [--upgrade-from <tag> | --no-upgrade <原因>] [--bridge-image <镜像>]
+# 六项：装得上 / 网页打得开 / 用户身份能用 / 工具 Bot 调得到 / 升级保数据 / 重装保数据；探针写了 extra_check 时另有一项附加检查。任何 FAIL 退出非 0。
+# 插件自己的探测在 scripts/smoke-probes.sh，写法见模板里的这个文件；一个仓库放多家插件时，WONTON_PLUGIN 指插件目录，
+# 探针放在那个目录的 smoke-probes.sh。
 # 作者已有的 .wonton 不动：整个工作区复制到临时目录，用冒烟自己的实例，跑完删掉容器、网络、卷和目录。
+# 输入变量、输出格式和退出码是和正式冒烟共用的约定，见模板仓库的 docs/smoke.md。
 #
 # --upgrade-from：从哪个 tag 升级验证数据；默认取 git describe 到的最近 tag，本仓库没有 tag 时“升级保数据”记 N/A。
 # WONTON_DEV_EGRESS_PROXY：给了就先把它配成核心的出口代理（插件冷启动要出网时用），不给就不配。
+# WONTON_SMOKE_TMPDIR：临时目录放在哪（默认 /tmp）；/tmp 是内存盘的主机换到磁盘上，路径越短越好（见下面的 107 字节）。
 set -uo pipefail
 # shellcheck source=scripts/lib.sh
 . "$(dirname "$0")/lib.sh"
@@ -16,33 +19,56 @@ set -uo pipefail
 
 usage() { sed -n '2,4p' "$0" >&2; exit 2; }
 upgrade_from=""
+no_upgrade=""
+bridge_image=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --upgrade-from) [[ $# -ge 2 && -n "$2" ]] || usage; upgrade_from="$2"; shift 2 ;;
+    --no-upgrade) [[ $# -ge 2 && -n "$2" ]] || usage; no_upgrade="$2"; shift 2 ;;
+    --bridge-image) [[ $# -ge 2 && -n "$2" ]] || usage; bridge_image="$2"; shift 2 ;;
     *) usage ;;
   esac
 done
+[[ -z "$upgrade_from" || -z "$no_upgrade" ]] || usage
 
 for tool in docker curl jq python3 timeout nice flock git; do
   need "$tool"
 done
+need_plugin
 
-mkdir -p "$root/.wonton"
-exec 9>"$root/.wonton/smoke.lock"
-flock -n 9 || die "同一仓库的另一套冒烟正在跑"
+# 冒烟只访问本机网关和栈内地址：主机为了上外网导出了代理变量时，这些请求被代理截走会回 502。
+# 套件自己的 curl 都带 --noproxy；这里兜住探针里没带的。
+for name in no_proxy NO_PROXY; do
+  export "$name=${!name:+${!name},}localhost,127.0.0.1,::1,.localhost,wonton.internal,.wonton.internal"
+done
 
-work="$(mktemp -d "${TMPDIR:-/tmp}/wonton-smoke.XXXXXX")"
+caller_dir="$PWD"
+# 锁和日志按插件放：多插件仓库的几家可以同时各跑一套冒烟。
+smoke_home="$root/.wonton"
+[[ "$plugin_rel" == . ]] || smoke_home="$root/.wonton/${plugin_rel//\//-}"
+mkdir -p "$smoke_home"
+exec 9>"$smoke_home/smoke.lock"
+flock -n 9 || die "同一个插件的另一套冒烟正在跑"
+
+# 状态目录放短路径：宿主网络插件的中继套接字在 <状态>/data/apps/<插件 id 把 . 换成 ->/relay/webui.sock，unix 套接字
+# 路径最多 107 字节。/tmp/ws.XXXXXX/s 是 16 字节，id 最长 63 时正好 107。不用 TMPDIR：macOS 的 TMPDIR 在
+# /var/folders/… 下，本身就有 40 多字节。
+# 换了 WONTON_SMOKE_TMPDIR 时每多一个字节，插件 id 能用的长度就少一个字节。
+tmp_root="${WONTON_SMOKE_TMPDIR:-/tmp}"
+[[ -d "$tmp_root" ]] || die "WONTON_SMOKE_TMPDIR 不是目录：$tmp_root"
+work="$(mktemp -d "${tmp_root%/}/ws.XXXXXX")"
 copy="$work/repo"
-LOG="$root/.wonton/smoke.log"
+LOG="$smoke_home/smoke.log"
 : >"$LOG"
 instance="smoke$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')"
 SMOKE_DIR="$copy"
-SMOKE_DEV_STATE="$copy/.wonton"
+if [[ "$plugin_rel" == . ]]; then SMOKE_PLUGIN="$copy"; else SMOKE_PLUGIN="$copy/$plugin_rel"; fi
+SMOKE_DEV_STATE="$work/s"
 # 数据标记是个空文件（与 e2e 冒烟的约定一致）：插件钩子只当它是文件，不往里建目录。
 SMOKE_STATE="$work/data-marker"
 : >"$SMOKE_STATE"
 SMOKE_INSTANCE="$instance"
-SMOKE_JAR="$copy/.wonton/session.cookies"
+SMOKE_JAR="$SMOKE_DEV_STATE/session.cookies"
 SMOKE_TOOLS="$work/tools.json"
 PROBES_LOG="$LOG"
 
@@ -52,11 +78,16 @@ strip_docker_proxies "$work/docker-config"
 
 cleanup() {
   local image=""
-  image="$(sed -n 's/^WONTON_CORE_IMAGE=//p' "$copy/.wonton/.env" 2>/dev/null | tail -1)"
-  if [[ -f "$copy/.wonton/.env" ]]; then
+  image="$(sed -n 's/^WONTON_CORE_IMAGE=//p' "$SMOKE_DEV_STATE/.env" 2>/dev/null | tail -1)"
+  if [[ -f "$SMOKE_DEV_STATE/.env" ]]; then
     say "清理实例 $instance"
-    (cd "$copy" && nice -n 19 timeout 900 scripts/dev.sh purge --yes) >>"$LOG" 2>&1
+    # 状态目录不在工作区里，purge 要经 probes_dev 带上 WONTON_DEV_STATE，不然它找不到 .env，核心栈整套留下。
+    probes_dev_t 900 purge --yes >>"$LOG" 2>&1
   fi
+  # 核心栈（核心、Matrix、身份提供方……）是 Compose 项目 wonton-<实例>，不带 wonton.instance 标签：purge 没成时按项目名删。
+  docker ps -aq --filter "label=com.docker.compose.project=wonton-$instance" | xargs -r docker rm -f >/dev/null 2>&1
+  docker network ls -q --filter "label=com.docker.compose.project=wonton-$instance" | xargs -r docker network rm >/dev/null 2>&1
+  docker volume ls -q --filter "label=com.docker.compose.project=wonton-$instance" | xargs -r docker volume rm >/dev/null 2>&1
   docker ps -aq --filter "label=wonton.instance=$instance" | xargs -r docker rm -f >/dev/null 2>&1
   docker network ls -q --filter "label=wonton.instance=$instance" | xargs -r docker network rm >/dev/null 2>&1
   docker volume ls -q --filter "label=wonton.instance=$instance" | xargs -r docker volume rm >/dev/null 2>&1
@@ -67,7 +98,8 @@ cleanup() {
     rm -rf "$work" 2>/dev/null
   fi
   local left
-  left="$(docker ps -aq --filter "label=wonton.instance=$instance" | wc -l)"
+  left="$({ docker ps -aq --filter "label=wonton.instance=$instance"
+    docker ps -aq --filter "label=com.docker.compose.project=wonton-$instance"; } | sort -u | wc -l)"
   say "残留资源（实例 $instance）：$left"
   if [[ "$left" != 0 ]]; then
     echo "FAIL 清理：残留 $left 个资源"
@@ -106,9 +138,14 @@ if [[ -n "${WONTON_SMOKE_MAX_STACKS:-}" ]]; then
   done
 fi
 
-# 升级验证的起点：--upgrade-from 指定的 tag，或 git describe 到的最近 tag；没有 tag 就不测升级。
-if [[ -z "$upgrade_from" ]]; then
-  upgrade_from="$(git -C "$root" describe --tags --abbrev=0 2>/dev/null || true)"
+# 升级验证的起点：--upgrade-from 指定的 tag，或 git describe 到的最近 tag；没有 tag 或给了 --no-upgrade 就不测升级。
+if [[ -n "$no_upgrade" ]]; then
+  :
+elif [[ -z "$upgrade_from" ]]; then
+  # 多插件仓库的 tag 按目录名分开（<目录名>/v<版本>），只认这家的。
+  describe_match=()
+  [[ "$plugin_rel" == . ]] || describe_match=(--match "$(tag_glob)")
+  upgrade_from="$(git -C "$root" describe --tags --abbrev=0 "${describe_match[@]}" 2>/dev/null || true)"
 else
   git -C "$root" rev-parse -q --verify "refs/tags/$upgrade_from^{commit}" >/dev/null ||
     die "本机没有 tag $upgrade_from"
@@ -124,12 +161,28 @@ tar -C "$root" --exclude=.wonton --exclude=.git -cf - . | tar -C "$copy" -xf - |
 [[ ! -d "$root/.git" ]] || ln -s "$root/.git" "$copy/.git"
 chmod -R a+rX "$copy"
 
-probes_facts "$copy"
+# --bridge-image：只换复制出来的工作区里 bridge 服务的镜像（升级起点的 tag 仍用它自己的清单）。插件没有 bridge 服务时
+# 报错退出：调用方要测的是换过的桥，静默跳过就等于没测。
+if [[ -n "$bridge_image" ]]; then
+  compose_json() { (cd "$SMOKE_PLUGIN" && docker compose -f docker-compose.yml config --no-interpolate --format json); }
+  facts="$(compose_json)" || die "解析不了 docker-compose.yml"
+  if [[ "$(jq -r '.services.bridge // empty | type' <<<"$facts")" != object ]]; then
+    echo "--bridge-image：清单里没有 bridge 服务，换不了桥镜像" >&2
+    exit 2
+  fi
+  replace_service_image "$SMOKE_PLUGIN/docker-compose.yml" bridge "$bridge_image" ||
+    die "--bridge-image：没找到 bridge 服务的 image 行（镜像写在锚点或扩展里时换不了）"
+  [[ "$(compose_json | jq -r '.services.bridge.image')" == "$bridge_image" ]] ||
+    die "--bridge-image：换完以后 bridge 的镜像不是 $bridge_image"
+  say "bridge 服务的镜像换成 $bridge_image"
+fi
+
+probes_facts "$SMOKE_PLUGIN"
 probes_load
 
 # ---------- 1. 装得上 ----------
 say "1. 装得上（check、install、running healthy）"
-chk_out="$(cd "$copy" && nice -n 19 timeout 900 scripts/check.sh 2>&1)" && chk_rc=0 || chk_rc=$?
+chk_out="$(cd "$copy" && WONTON_PLUGIN="$SMOKE_PLUGIN" nice -n 19 timeout 900 scripts/check.sh 2>&1)" && chk_rc=0 || chk_rc=$?
 printf '%s\n' "$chk_out" >>"$LOG"
 chk_first="$(head -1 <<<"$chk_out")"
 if ((chk_rc != 0)); then
@@ -170,6 +223,13 @@ say "Hermes：$hermes_line"
 if [[ "$(jq -r '(."x-wonton".permissions // []) | index("models") // empty' <<<"$PROBES_FACTS")" != "" ]]; then
   magpie_line="$(probes_status_wait ai.usemagpie.magpie 30)" ||
     { fail 装得上 "模型网关不是 running healthy：$magpie_line"; exit 0; }
+  if [[ -n "${WONTON_DEV_MODEL_BASE_URL:-}" ]]; then
+    say "接模型上游 $WONTON_DEV_MODEL_BASE_URL（${WONTON_DEV_MODEL:-}）"
+    # 冒烟在副本目录里跑 dev.sh：相对路径的 key 文件按调用时的目录算。
+    probes_dev model "$WONTON_DEV_MODEL_BASE_URL" "${WONTON_DEV_MODEL:-}" \
+      "$(cd "$caller_dir" && realpath "${WONTON_DEV_MODEL_KEY_FILE:-}")" >>"$LOG" 2>&1 ||
+      { fail 装得上 "接模型上游失败，看 $LOG"; exit 0; }
+  fi
 fi
 
 if declare -F before_install >/dev/null; then
@@ -211,7 +271,7 @@ else
 fi
 
 # 探针部分：网页打得开、用户身份能用、工具 Bot 调得到，和 dev.sh probes 共用。
-probes_run web_assert identity_check mcp
+probes_run web_assert identity_check mcp extra_check
 
 # ---------- 5/6. 升级/重装保数据 ----------
 say "5/6. 升级保数据、重装保数据"
@@ -224,6 +284,8 @@ elif (( DATA_HOOKS == 0 )); then
 else
   if [[ -n "$upgrade_from" && "$data_upgrade_base" == 1 && "$data_wrote" == 1 ]]; then
     probes_data_check 升级保数据 "升级自 tag $upgrade_from"
+  elif [[ -n "$no_upgrade" ]]; then
+    na 升级保数据 "$no_upgrade（调用方给了 --no-upgrade），只测重装"
   elif [[ -z "$upgrade_from" ]]; then
     na 升级保数据 "本仓库没有 tag，只测重装（可用 --upgrade-from 指定）"
   fi
